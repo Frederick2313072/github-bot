@@ -14,6 +14,11 @@ GITHUB_SECRET = os.environ.get('GITHUB_SECRET')
 FEISHU_WEBHOOK_URL = os.environ.get('FEISHU_WEBHOOK_URL')
 FEISHU_SECRET = os.environ.get('FEISHU_SECRET')
 
+# 检查必要的环境变量
+if not FEISHU_WEBHOOK_URL:
+    print("错误：未设置 FEISHU_WEBHOOK_URL 环境变量")
+    print("请在 Vercel 项目设置中添加 FEISHU_WEBHOOK_URL 环境变量")
+
 def verify_github_signature(req):
     """验证 GitHub Webhook 签名"""
     if not GITHUB_SECRET:
@@ -39,6 +44,10 @@ def gen_sign(timestamp, secret):
 
 def send_to_feishu(card_json):
     """发送消息到飞书"""
+    if not FEISHU_WEBHOOK_URL:
+        print("错误：FEISHU_WEBHOOK_URL 环境变量未设置，无法发送消息")
+        return False
+    
     headers = {'Content-Type': 'application/json'}
     payload = {
         "msg_type": "interactive",
@@ -55,8 +64,10 @@ def send_to_feishu(card_json):
         response = requests.post(FEISHU_WEBHOOK_URL, headers=headers, json=payload)
         response.raise_for_status()
         print("消息已成功发送到飞书:", response.json())
+        return True
     except requests.exceptions.RequestException as e:
         print(f"发送消息到飞书时出错: {e}")
+        return False
 
 def handle_push_event(payload):
     """处理 push 事件"""
@@ -167,7 +178,7 @@ def handle_issues_event(payload):
             {
                 "tag": "div",
                 "text": {
-                    "content": f"**描述:** {issue['body'][:200]}{'...' if len(issue['body']) > 200 else ''}",
+                    "content": f"**描述:** {(issue['body'] or '无描述')[:200]}{'...' if issue['body'] and len(issue['body']) > 200 else ''}",
                     "tag": "lark_md"
                 }
             },
@@ -231,7 +242,7 @@ def handle_pull_request_event(payload):
             {
                 "tag": "div",
                 "text": {
-                    "content": f"**描述:** {pr['body'][:200] if pr['body'] else '无描述'}{'...' if pr['body'] and len(pr['body']) > 200 else ''}",
+                    "content": f"**描述:** {(pr['body'] or '无描述')[:200]}{'...' if pr['body'] and len(pr['body']) > 200 else ''}",
                     "tag": "lark_md"
                 }
             },
@@ -277,7 +288,7 @@ def handle_release_event(payload):
                 {
                     "tag": "div",
                     "text": {
-                        "content": f"**发布说明:**\\n{release['body'][:300] if release['body'] else '无发布说明'}{'...' if release['body'] and len(release['body']) > 300 else ''}",
+                        "content": f"**发布说明:**\\n{(release['body'] or '无发布说明')[:300]}{'...' if release['body'] and len(release['body']) > 300 else ''}",
                         "tag": "lark_md"
                     }
                 },
@@ -302,37 +313,78 @@ def handle_release_event(payload):
 @app.route('/', methods=['GET'])
 def health_check():
     """健康检查接口"""
+    config_status = {
+        'FEISHU_WEBHOOK_URL': '已配置' if FEISHU_WEBHOOK_URL else '未配置',
+        'GITHUB_SECRET': '已配置' if GITHUB_SECRET else '未配置',
+        'FEISHU_SECRET': '已配置' if FEISHU_SECRET else '未配置'
+    }
+    
     return {
-        'status': 'ok',
-        'message': 'GitHub-飞书机器人运行正常',
+        'status': 'ok' if FEISHU_WEBHOOK_URL else 'error',
+        'message': 'GitHub-飞书机器人运行正常' if FEISHU_WEBHOOK_URL else '缺少必要的环境变量配置',
+        'config': config_status,
         'timestamp': datetime.now().isoformat()
     }
 
 @app.route('/', methods=['POST'])
 def webhook_handler():
     """接收 Webhook 请求的入口"""
+    # 检查环境变量
+    if not FEISHU_WEBHOOK_URL:
+        error_msg = "错误：FEISHU_WEBHOOK_URL 环境变量未配置"
+        print(error_msg)
+        return error_msg, 500
+    
+    # 验证签名
     if not verify_github_signature(request):
         abort(401, '无效签名')
     
+    # 获取事件类型和数据
     event_type = request.headers.get('X-GitHub-Event')
-    payload = request.json
-    
-    print(f"收到 GitHub 事件: {event_type}")
     
     try:
+        payload = request.get_json()
+        if payload is None:
+            error_msg = "错误：无法解析 JSON 数据"
+            print(error_msg)
+            return error_msg, 400
+            
+        print(f"收到 GitHub 事件: {event_type}")
+        print(f"事件数据键: {list(payload.keys()) if payload else 'None'}")
+        
+        # 处理不同类型的事件
         if event_type == 'push':
+            if 'repository' not in payload or 'pusher' not in payload:
+                print("Push 事件数据不完整")
+                return "Push 事件数据不完整", 400
             handle_push_event(payload)
         elif event_type == 'issues':
+            if 'issue' not in payload or 'action' not in payload:
+                print("Issues 事件数据不完整")
+                return "Issues 事件数据不完整", 400
             handle_issues_event(payload)
         elif event_type == 'pull_request':
+            if 'pull_request' not in payload or 'action' not in payload:
+                print("Pull Request 事件数据不完整")
+                return "Pull Request 事件数据不完整", 400
             handle_pull_request_event(payload)
         elif event_type == 'release':
+            if 'release' not in payload or 'action' not in payload:
+                print("Release 事件数据不完整")
+                return "Release 事件数据不完整", 400
             handle_release_event(payload)
+        elif event_type == 'ping':
+            print("收到 GitHub Webhook ping 事件")
+            return "Webhook 配置成功！", 200
         else:
             print(f"未处理的事件类型: {event_type}")
+            return f"未处理的事件类型: {event_type}", 200
+            
     except Exception as e:
-        print(f"处理事件时发生错误: {e}")
-        return f'处理事件时发生错误: {str(e)}', 500
+        error_msg = f"处理事件时发生错误: {str(e)}"
+        print(error_msg)
+        print(f"错误详情: {type(e).__name__}")
+        return error_msg, 500
     
     return 'OK', 200
 
