@@ -42,6 +42,68 @@ def gen_sign(timestamp, secret):
     sign = base64.b64encode(hmac_code).decode('utf-8')
     return sign
 
+def format_commit_message(commit):
+    """格式化提交信息，添加图标和样式"""
+    import re
+
+    message = commit.get("message", "无提交信息").split('\n')[0]
+    author = commit.get("author", {}).get("name", "未知作者")
+
+    # 为提交者添加@符号并加粗
+    author_display = f"**@{author}**" if author != "未知作者" else author
+
+    # 使用正则表达式匹配提交类型，包括带括号的格式
+    commit_type_match = re.match(r'^(\w+)(\([^)]*\))?:\s', message.lower())
+
+    if commit_type_match:
+        commit_type = commit_type_match.group(1)
+
+        # 根据提交类型添加图标
+        if commit_type == 'feat':
+            icon = "✨"
+            type_label = "特性"
+        elif commit_type == 'fix':
+            icon = "🐛"
+            type_label = "修复"
+        elif commit_type == 'docs':
+            icon = "📚"
+            type_label = "文档"
+        elif commit_type == 'style':
+            icon = "💅"
+            type_label = "样式"
+        elif commit_type == 'refactor':
+            icon = "♻️"
+            type_label = "重构"
+        elif commit_type == 'test':
+            icon = "🧪"
+            type_label = "测试"
+        elif commit_type == 'chore':
+            icon = "🔧"
+            type_label = "杂项"
+        elif commit_type == 'perf':
+            icon = "⚡"
+            type_label = "性能"
+        elif commit_type == 'ci':
+            icon = "🚀"
+            type_label = "CI"
+        elif commit_type == 'build':
+            icon = "📦"
+            type_label = "构建"
+        elif commit_type == 'revert':
+            icon = "⏪"
+            type_label = "回滚"
+        else:
+            icon = "📝"
+            type_label = "其他"
+    elif message.lower().startswith('merge'):
+        icon = "🔀"
+        type_label = "合并"
+    else:
+        icon = "📝"
+        type_label = "其他"
+
+    return f"{icon} **{type_label}** {message}", author_display
+
 def send_to_feishu(card_json):
     """发送消息到飞书"""
     if not FEISHU_WEBHOOK_URL:
@@ -72,68 +134,146 @@ def send_to_feishu(card_json):
 def handle_push_event(payload):
     """处理 push 事件"""
     repo_name = payload['repository']['full_name']
-    pusher_name = payload['pusher']['name']
-    compare_url = payload['compare']
-    branch = payload['ref'].replace('refs/heads/', '')
+    ref = payload.get("ref", "未知分支") 
+    branch_name = ref.split("/")[-1] if ref else "未知分支"
     
-    commits_text = ""
-    commit_count = len(payload['commits'])
+    pusher_name = payload.get("pusher", {}).get("name", "未知推送者")
     
-    for commit in payload['commits'][:5]:
-        commit_id = commit['id'][:7]
-        message = commit['message'].split('\n')[0]
-        author = commit['author']['name']
-        commits_text += f"\\n- `{commit_id}`: {message} - {author}"
-    
-    if commit_count > 5:
-        commits_text += f"\\n... 还有 {commit_count - 5} 个提交"
-    
-    if not commits_text:
-        commits_text = "\\n没有新的提交"
-    
-    card = {
-        "config": {"wide_screen_mode": True},
-        "header": {
-            "template": "blue",
-            "title": {"content": f"🚀 [{repo_name}] 代码推送", "tag": "plain_text"}
+    commits = payload.get("commits", [])
+    if not commits:
+        head_commit = payload.get("head_commit")
+        if head_commit:
+            commit_message = head_commit.get("message", "无提交信息 (可能为创建/删除分支)")
+            commit_url = head_commit.get("url", "#")
+            commit_author = head_commit.get("author", {}).get("name", pusher_name)
+        else:
+            commit_message = "无具体代码变更 (例如：分支创建/删除)"
+            commit_url = payload.get("compare", "#")
+            commit_author = pusher_name
+    else:
+        # 处理多个提交的情况
+        if len(commits) == 1:
+            # 单个提交时使用格式化函数
+            single_commit = commits[0]
+            formatted_message, author_display = format_commit_message(single_commit)
+            commit_message = formatted_message
+            commit_url = single_commit.get("url", "#")
+            commit_author = author_display
+        else:
+            # 多个提交时，展示所有提交信息
+            commit_details = []
+            # 收集所有不同的提交者
+            unique_authors = set()
+            for commit in commits:
+                author = commit.get("author", {}).get("name", "未知作者")
+                if author and author != "未知作者":
+                    unique_authors.add(author)
+
+            for i, commit in enumerate(commits, 1):
+                formatted_message, author_display = format_commit_message(commit)
+                commit_details.append(f"{i}. {author_display}: {formatted_message}")
+
+            commit_message = "\\n".join(commit_details)
+            commit_url = payload.get("compare", "#")  # 使用compare URL查看所有变更
+
+            # 提交者显示为逗号分隔的名字列表
+            if unique_authors:
+                authors_list = [f"**@{author}**" for author in unique_authors]
+                commit_author = ", ".join(authors_list)
+            else:
+                commit_author = "未知提交者"
+
+    # --- 构建消息卡片 ---
+    card_elements = [
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"📦 **仓库**: {repo_name}"}
         },
-        "elements": [
-            {
-                "tag": "div",
-                "text": {
-                    "content": f"**分支:** {branch}\\n**推送人:** {pusher_name}\\n**提交数量:** {commit_count}",
-                    "tag": "lark_md"
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"🌿 **分支**: {branch_name}"}
+        },
+        {
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"👤 **提交者**: {commit_author}"}
+        }
+    ]
+
+    # 处理提交信息显示
+    if len(commits) <= 1:
+        # 单个提交的情况
+        card_elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"💬 **信息**: {commit_message}"}
+        })
+        card_elements.append({
+            "tag": "action",
+            "actions": [
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "🔗 查看提交详情"},
+                    "type": "default",
+                    "url": commit_url
                 }
-            },
-            {
+            ]
+        })
+    else:
+        # 多个提交的情况
+        card_elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"✨ **总提交数**: {len(commits)}"}
+        })
+
+        # 限制显示的提交数量，避免卡片过长
+        max_display_commits = 10
+        displayed_commits = commits[:max_display_commits]
+
+        # 添加提交列表
+        for i, commit in enumerate(displayed_commits, 1):
+            formatted_message, author_display = format_commit_message(commit)
+            card_elements.append({
                 "tag": "div",
-                "text": {
-                    "content": f"**提交详情:**{commits_text}",
-                    "tag": "lark_md"
-                }
-            },
-            {
-                "tag": "hr"
-            },
-            {
+                "text": {"tag": "lark_md", "content": f"  {i}. {author_display}: {formatted_message}"}
+            })
+
+        # 如果有更多提交，显示省略信息
+        if len(commits) > max_display_commits:
+            remaining = len(commits) - max_display_commits
+            card_elements.append({
+                "tag": "div",
+                "text": {"tag": "lark_md", "content": f"  ... 还有{remaining}个提交"}
+            })
+
+        # 添加查看所有变更的按钮
+        compare_url_from_payload = payload.get("compare")
+        if compare_url_from_payload:
+            card_elements.append({
                 "tag": "action",
                 "actions": [
                     {
                         "tag": "button",
-                        "text": {"content": "查看变更", "tag": "plain_text"},
-                        "type": "primary",
-                        "url": compare_url
-                    },
-                    {
-                        "tag": "button",
-                        "text": {"content": "访问仓库", "tag": "plain_text"},
+                        "text": {"tag": "plain_text", "content": "🔍 查看所有变更"},
                         "type": "default",
-                        "url": payload['repository']['html_url']
+                        "url": compare_url_from_payload
                     }
                 ]
-            }
-        ]
+            })
+    
+    card_elements.append({
+        "tag": "div",
+        "text": {"tag": "lark_md", "content": "💾 请及时拉取最新数据 git pull origin main"}
+    })
+    
+    # 完整的消息卡片JSON对象
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {"tag": "plain_text", "content": "GitHub 项目更新通知"},
+            "template": "blue"
+        },
+        "elements": card_elements
     }
+    
     send_to_feishu(card)
 
 def handle_issues_event(payload):
